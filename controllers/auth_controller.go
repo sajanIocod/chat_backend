@@ -5,40 +5,157 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sajanbaisil/chat_backend/models"
-	"github.com/sajanbaisil/chat_backend/utils"
+	"github.com/sajanIocod/chat_backend/models"
+	"github.com/sajanIocod/chat_backend/utils"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+
 	"golang.org/x/crypto/bcrypt"
 )
 
 func Register(c *gin.Context) {
 	var user models.User
-	c.BindJSON(&user)
+	if err := c.BindJSON(&user); err != nil {
+		c.JSON(400, models.Response{
+			ResponseCode: 400,
+			Message:      "Invalid request data",
+			Data:         nil,
+		})
+		return
+	}
 
 	collection := utils.DB.Collection("users")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// Generate a new ObjectID for the user
+	user.ID = primitive.NewObjectID()
 
 	// Check if user exists
-	count, _ := collection.CountDocuments(ctx, bson.M{"email": user.Email})
-	if count > 0 {
-		c.JSON(400, gin.H{"error": "Email already registered"})
+	existingCount, _ := collection.CountDocuments(ctx, bson.M{"email": user.Email})
+	if existingCount > 0 {
+		c.JSON(400, models.Response{
+			ResponseCode: 400,
+			Message:      "Email already registered",
+			Data:         nil,
+		})
 		return
 	}
 
 	// Hash password
-	hash, _ := bcrypt.GenerateFromPassword([]byte(user.Password), 10)
-	user.Password = string(hash)
-
-	res, err := collection.InsertOne(ctx, user)
+	hash, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "Registration failed"})
+		c.JSON(500, models.Response{
+			ResponseCode: 500,
+			Message:      "Error hashing password",
+			Data:         nil,
+		})
+		return
+	}
+	user.Password = string(hash)
+	// Insert user
+	_, err = collection.InsertOne(ctx, user)
+	if err != nil {
+		c.JSON(500, models.Response{
+			ResponseCode: 500,
+			Message:      "Registration failed: " + err.Error(),
+			Data:         nil,
+		})
 		return
 	}
 
-	if oid, ok := res.InsertedID.(primitive.ObjectID); ok {
-		user.ID = oid
+	// Generate JWT token
+	// Generate JWT token
+	token, err := utils.GenerateJWT(user.ID.Hex())
+	if err != nil {
+		c.JSON(500, models.Response{
+			ResponseCode: 500,
+			Message:      "Error generating token",
+			Data:         nil,
+		})
+		return
 	}
-	c.JSON(200, user)
+
+	// Don't send password in response
+	userResp := models.UserResponse{
+		ID:       user.ID,
+		Email:    user.Email,
+		Username: user.Username,
+		Token:    "Bearer " + token,
+	}
+	c.JSON(200, models.Response{
+		ResponseCode: 200,
+		Message:      "User registered successfully",
+		Data:         userResp,
+	})
+}
+
+func Login(c *gin.Context) {
+	var input struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := c.BindJSON(&input); err != nil {
+		c.JSON(400, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	collection := utils.DB.Collection("users")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var user models.User
+	err := collection.FindOne(ctx, bson.M{"email": input.Email}).Decode(&user)
+	if err != nil {
+		c.JSON(401, models.Response{
+			ResponseCode: 401,
+			Message:      "Invalid email or password",
+			Data:         nil,
+		})
+		return
+	}
+	// Check password
+	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Password))
+	if err != nil {
+		c.JSON(401, models.Response{
+			ResponseCode: 401,
+			Message:      "Invalid email or password",
+			Data:         nil,
+		})
+		return
+	}
+	// Generate JWT token
+	token, err := utils.GenerateJWT(user.ID.Hex())
+	if err != nil {
+		c.JSON(500, models.Response{
+			ResponseCode: 500,
+			Message:      "Error generating token",
+			Data:         nil,
+		})
+		return
+	}
+	// Don't send password in response
+	userResp := models.UserResponse{
+		ID:       user.ID,
+		Email:    user.Email,
+		Username: user.Username,
+		Token:    "Bearer " + token,
+	}
+	c.JSON(200, models.Response{
+		ResponseCode: 200,
+		Message:      "Login successful",
+		Data:         userResp,
+	})
+
+}
+
+func Profile(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(500, gin.H{"error": "User ID not found in context"})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"message": "Access granted",
+		"userID":  userID,
+	})
 }
