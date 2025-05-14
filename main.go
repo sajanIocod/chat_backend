@@ -7,6 +7,7 @@ import (
 
 func main() {
 	utils.ConnectDB()
+	utils.InitPusher()
 	r := routes.SetupRouter()
 	r.Run(":8080")
 }

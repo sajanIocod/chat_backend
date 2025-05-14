@@ -1,6 +1,10 @@
 package models
 
-import "go.mongodb.org/mongo-driver/bson/primitive"
+import (
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
+)
 
 type User struct {
 	ID       primitive.ObjectID `json:"id" bson:"_id,omitempty"`
@@ -20,4 +24,9 @@ type UserResponse struct {
 	Email    string             `json:"email" bson:"email"`
 	Token    string             `json:"token"`
 	Username string             `json:"username" bson:"username"`
+}
+
+type BlacklistedToken struct {
+	Token     string    `bson:"token"`
+	ExpiredAt time.Time `bson:"expiredAt"`
 }

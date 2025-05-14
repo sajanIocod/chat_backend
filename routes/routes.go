@@ -12,6 +12,7 @@ func SetupRouter() *gin.Engine {
 	// Public routes
 	r.POST("/register", controllers.Register)
 	r.POST("/login", controllers.Login)
+	r.POST("/pusher/auth", controllers.PusherAuth)
 
 	// Protected routes
 	auth := r.Group("/api")
@@ -19,7 +20,13 @@ func SetupRouter() *gin.Engine {
 	{
 		// auth.GET("/profile", controllers.Profile) // Example
 		auth.GET("/users", controllers.GetUsers) // To be created
-		auth.POST("/messages", controllers.SendMessage)
+
+		// Chat routes
+		auth.GET("/chats", controllers.GetChatList)
+		auth.GET("/chat", controllers.GetChatByID)
+
+		// Message routes
+		auth.POST("/send-message", controllers.SendMessage)
 		auth.GET("/messages/:userId", controllers.GetMessages)
 		auth.POST("/messages/markseen/:userId", controllers.MarkMessagesSeen)
 		auth.POST("/suggestions", controllers.GetReplySuggestions)

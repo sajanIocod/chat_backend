@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"time"
 
@@ -23,14 +24,22 @@ func SendMessage(c *gin.Context) {
 
 	var req models.MessageRequest
 	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		c.JSON(http.StatusBadRequest, models.Response{
+			ResponseCode: http.StatusBadRequest,
+			Message:      "Invalid request",
+			Data:         nil,
+		})
 		return
 	}
 
 	// Convert receiver ID to ObjectID
 	receiverID, err := primitive.ObjectIDFromHex(req.ReceiverID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid receiver ID"})
+		c.JSON(http.StatusBadRequest, models.Response{
+			ResponseCode: http.StatusBadRequest,
+			Message:      "Invalid receiver ID",
+			Data:         nil,
+		})
 		return
 	}
 
@@ -38,29 +47,62 @@ func SendMessage(c *gin.Context) {
 	userCollection := utils.DB.Collection("users")
 	userCount, err := userCollection.CountDocuments(ctx, bson.M{"_id": receiverID})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error checking receiver"})
+		c.JSON(http.StatusInternalServerError, models.Response{
+			ResponseCode: http.StatusInternalServerError,
+			Message:      "Error checking receiver",
+			Data:         nil,
+		})
 		return
 	}
 	if userCount == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Receiver does not exist"})
+		c.JSON(http.StatusBadRequest, models.Response{
+			ResponseCode: http.StatusBadRequest,
+			Message:      "Receiver does not exist",
+			Data:         nil,
+		})
 		return
 	}
 
-	message := bson.M{
-		"senderId":   senderID,
-		"receiverId": receiverID,
-		"content":    req.Content,
-		"seen":       false,
-		"createdAt":  time.Now(),
+	// Create message
+	message := models.Message{
+		ID:         primitive.NewObjectID(),
+		SenderID:   senderID,
+		ReceiverID: receiverID,
+		Content:    req.Content,
+		Seen:       false,
+		CreatedAt:  time.Now(),
 	}
 
+	// Save to MongoDB
 	_, err = utils.DB.Collection("messages").InsertOne(ctx, message)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send message"})
+		c.JSON(http.StatusInternalServerError, models.Response{
+			ResponseCode: http.StatusInternalServerError,
+			Message:      "Failed to send message",
+			Data:         nil,
+		})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Message sent"})
+	// Trigger Pusher event
+	eventData := gin.H{
+		"message": message,
+		"type":    "new-message",
+	}
+
+	// Trigger to both sender and receiver channels
+	channelName := "private-chat-" + receiverID.Hex()
+	err = utils.PusherClient.Trigger(channelName, "message", eventData)
+	if err != nil {
+		log.Printf("[ERROR] Failed to trigger Pusher event: %v", err)
+		// Don't return error to client as message is already saved
+	}
+
+	c.JSON(http.StatusOK, models.Response{
+		ResponseCode: http.StatusOK,
+		Message:      "Message sent successfully",
+		Data:         message,
+	})
 }
 
 // Get messages between logged-in user and another user
@@ -146,3 +188,169 @@ func MarkMessagesSeen(c *gin.Context) {
 	})
 }
 
+// delete - chat history
+func DeleteChatHistory(c *gin.Context) {
+	currentUser := utils.ObjectIDFromHex(c.GetString("userID"))
+	otherID, err := primitive.ObjectIDFromHex(c.Param("userId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.Response{
+			ResponseCode: http.StatusBadRequest,
+			Message:      "Invalid user ID",
+			Data:         nil,
+		})
+		return
+	}
+
+	filter := bson.M{
+		"$or": []bson.M{
+			{"senderId": currentUser, "receiverId": otherID},
+			{"senderId": otherID, "receiverId": currentUser},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := utils.DB.Collection("messages").DeleteMany(ctx, filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.Response{
+			ResponseCode: http.StatusInternalServerError,
+			Message:      "Failed to delete chat history",
+			Data:         nil,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, models.Response{
+		ResponseCode: http.StatusOK,
+		Message:      "Chat history deleted successfully",
+		Data: gin.H{
+			"deletedCount": result.DeletedCount,
+			"matchedCount": result.DeletedCount,
+		},
+	})
+}
+
+func GetChatByID(c *gin.Context) {
+	chatID := c.Query("id")
+	if chatID == "" {
+		c.JSON(http.StatusBadRequest, models.Response{
+			ResponseCode: http.StatusBadRequest,
+			Message:      "Chat ID is required",
+			Data:         nil,
+		})
+		return
+	}
+
+	currentUserID := c.GetString("userID")
+	log.Printf("[INFO] Fetching chat by ID: %s for user: %s", chatID, currentUserID)
+
+	// Convert string IDs to ObjectIDs
+	currentUserObjID := utils.ObjectIDFromHex(currentUserID)
+	chatObjID, err := primitive.ObjectIDFromHex(chatID)
+	if err != nil {
+		log.Printf("[ERROR] Invalid chat ID format: %v", err)
+		c.JSON(http.StatusBadRequest, models.Response{
+			ResponseCode: http.StatusBadRequest,
+			Message:      "Invalid chat ID format",
+			Data:         nil,
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Build aggregation pipeline
+	pipeline := []bson.M{
+		{
+			"$match": bson.M{
+				"_id": chatObjID,
+				"$or": []bson.M{
+					{"senderID": currentUserObjID},
+					{"receiverID": currentUserObjID},
+				},
+			},
+		},
+		{
+			"$lookup": bson.M{
+				"from":         "users",
+				"localField":   "senderID",
+				"foreignField": "_id",
+				"as":           "sender",
+			},
+		},
+		{
+			"$lookup": bson.M{
+				"from":         "users",
+				"localField":   "receiverID",
+				"foreignField": "_id",
+				"as":           "receiver",
+			},
+		},
+		{
+			"$unwind": "$sender",
+		},
+		{
+			"$unwind": "$receiver",
+		},
+		{
+			"$project": bson.M{
+				"_id":       1,
+				"content":   1,
+				"seen":      1,
+				"createdAt": 1,
+				"sender": bson.M{
+					"_id":      1,
+					"username": 1,
+					"email":    1,
+				},
+				"receiver": bson.M{
+					"_id":      1,
+					"username": 1,
+					"email":    1,
+				},
+			},
+		},
+	}
+
+	// Execute aggregation
+	cursor, err := utils.DB.Collection("messages").Aggregate(ctx, pipeline)
+	if err != nil {
+		log.Printf("[ERROR] Failed to execute aggregation: %v", err)
+		c.JSON(http.StatusInternalServerError, models.Response{
+			ResponseCode: http.StatusInternalServerError,
+			Message:      "Failed to fetch chat details",
+			Data:         nil,
+		})
+		return
+	}
+	defer cursor.Close(ctx)
+
+	var results []bson.M
+	if err := cursor.All(ctx, &results); err != nil {
+		log.Printf("[ERROR] Failed to decode results: %v", err)
+		c.JSON(http.StatusInternalServerError, models.Response{
+			ResponseCode: http.StatusInternalServerError,
+			Message:      "Failed to process chat details",
+			Data:         nil,
+		})
+		return
+	}
+
+	if len(results) == 0 {
+		c.JSON(http.StatusNotFound, models.Response{
+			ResponseCode: http.StatusNotFound,
+			Message:      "Chat not found or you don't have access to it",
+			Data:         nil,
+		})
+		return
+	}
+
+	// Return the first (and should be only) result
+	c.JSON(http.StatusOK, models.Response{
+		ResponseCode: http.StatusOK,
+		Message:      "Chat fetched successfully",
+		Data:         results[0],
+	})
+}

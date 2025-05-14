@@ -2,6 +2,8 @@ package controllers
 
 import (
 	"context"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -157,5 +159,39 @@ func Profile(c *gin.Context) {
 	c.JSON(200, gin.H{
 		"message": "Access granted",
 		"userID":  userID,
+	})
+}
+
+func Logout(c *gin.Context) {
+	tokenString := c.GetHeader("Authorization") // Bearer <token>
+	if tokenString == "" {
+		c.JSON(http.StatusBadRequest, models.Response{
+			ResponseCode: http.StatusBadRequest,
+			Message:      "Authorization header is required",
+			Data:         nil,
+		})
+		return
+	}
+	token := strings.TrimPrefix(tokenString, "Bearer ")
+
+	// Save to blacklist
+	blacklisted := models.BlacklistedToken{
+		Token:     token,
+		ExpiredAt: time.Now().Add(time.Hour * 24), // depends on token expiry
+	}
+	_, err := utils.DB.Collection("blacklisted_tokens").InsertOne(context.TODO(), blacklisted)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.Response{
+			ResponseCode: http.StatusInternalServerError,
+			Message:      "Failed to blacklist token",
+			Data:         nil,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, models.Response{
+		ResponseCode: http.StatusOK,
+		Message:      "Logout successful",
+		Data:         nil,
 	})
 }
